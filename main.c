@@ -1,145 +1,248 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <math.h>
 
-double* inverseZTable;
-int inverseZTableSize;
+typedef struct {
+    double errorMin;
+    double errorMax;
+    double errorAv;
+    double coef[100];
+} approx;
 
-double* extremeTable;
-int extremeTableSize;
-double extremeTableThreshold;
+/*
+Find the best approximation in [A, B] with the given term form for the given function.
+Stores the approximation data in D if it finds an approximation close to f
+at frequency x-values spaced evenly in each interval between the points
+where the approximation intersects f.
+term is the function that takes an x-value and a vector to store the terms in.
+N is the number of terms in the numerator.
+M is the number of terms in the denominator.
+points are the starting points at which the approximation will initially intersect f.
+stepScale and stepMax between 0 and 1 determine the algorithm step size.
+*/
+bool approximate(approx* D, double f(double), double term(double, double*), int N, int M, double A, double B, int frequency, double* points, int iterations, double stepScale, double stepMax, bool print){
+    if(N < 0 || N > 100) return 0;
+    if(M < 0 || M > 100) return 0;
+    int K = N + M;
+    if(K > 100) return 0;
+    if(A >= B) return 0;
+    if(frequency < 2) return 0;
+    if(stepScale < 0.0 || stepScale > 1.0) return 0;
+    if(stepMax < 0.0 || stepMax > 1.0) return 0;
+    if(iterations < 0) return 0;
 
-
-double zToProb(double z){
-    return 0.5 * (1.0 + erf(z / sqrt(2.0)));
-}
-
-// slow but perfectly accurate
-double findZGivenProb(double p, double l, double r){
-    double m = (l + r) / 2;
-    if(r - l <= 0.00000000001) return m;
-    if(zToProb(m) > p) return findZGivenProb(p, l, m);
-    return findZGivenProb(p, m, r);
-}
-
-void generateInverseZTable(int numValuesInTable, int numValuesInExtremeTable, double threshold){
-    if(numValuesInTable < 10 || numValuesInTable > 100000000){
-        printf("The number of values to generate the inverse z-table must be between 10 and 100000000.\n\n");
-        exit(1);
+    for(int i=0;i<K;i++){
+        double x = points[i];
+        if(x < A || x > B) return 0;
+    }
+    for(int i=1;i<K;i++){
+        if(points[i-1] >= points[i]) return 0;
     }
 
-    inverseZTableSize = numValuesInTable;
-    inverseZTable = (double*)malloc(sizeof(double) * (numValuesInTable + 1));
+    for(int T=0;T<iterations;T++){
 
-    // use 2 values before last to find last value
-    double upperBound = 2 * findZGivenProb((double)(numValuesInTable - 1) / (double)(numValuesInTable), -7.5, 7.5) - findZGivenProb((double)(numValuesInTable - 2) / (double)(numValuesInTable), -7.5, 7.5);
+        // Create the K x K+1 matrix.
+        double v[100][101];
+        for(int i=0;i<K;i++){
+            double x = points[i];
+            double y = f(x);
 
-    for(int i = 0; i <= numValuesInTable; i++){
-        inverseZTable[i] = findZGivenProb((double)(i) / (double)(numValuesInTable), -upperBound, upperBound);
-    }
+            // Compute the vector result of the terms.
+            double r[100];
+            term(x, r);
 
-    extremeTableSize = numValuesInExtremeTable;
-    extremeTableThreshold = threshold;
-    extremeTable = (double*)malloc(sizeof(double) * (numValuesInExtremeTable + 1));
+            // Set numerator elements as the computed term and denominator elements as y times that.
+            for(int j=0;j<K;j++){
+                double z = r[j];
+                if(j >= N){
+                    z *= y;
+                }
+                v[i][j] = z;
+            }
+            v[i][K] = y;
+        }
 
-    // use 2 values before last to find last value
-    upperBound = 2 * findZGivenProb(threshold + (1.0 - threshold) * (double)(numValuesInExtremeTable - 1) / (double)(numValuesInExtremeTable), -7.5, 7.5) - findZGivenProb(threshold + (1.0 - threshold) * (double)(numValuesInExtremeTable - 2) / (double)(numValuesInExtremeTable), -7.5, 7.5);
+        // Row reduce the matrix to solve for the coefficients.
+        for(int i=0;i<K;i++){ // iterate over columns
+            // Zero out the other elements in this column by adding a multiple of this row to other rows.
+            for(int j=0;j<K;j++){ // iterate over rows
+                if(i == j) continue;
+                if(v[i][i] == 0.0){
+                    printf("Iteration %i: interpolation problem could not be solved.\n", T);
+                    return 0;
+                }
+                double ratio = v[j][i] / v[i][i];
+                v[j][i] = 0.0;
+                for(int a=i+1;a<=K;a++){ // iterate over row elements
+                    v[j][a] -= v[i][a] * ratio;
+                }
+            }
+        }
 
-    for(int i = 0; i <= numValuesInExtremeTable; i++){
-        extremeTable[i] = findZGivenProb(threshold + (1.0 - threshold) * (double)(i) / (double)(numValuesInExtremeTable), -upperBound, upperBound);
-    }
-}
+        // Normalize the pivot elements.
+        for(int i=0;i<K;i++){ // iterate over rows
+            double s = 1.0 / v[i][i];
+            v[i][i] = 1.0;
+            for(int j=i+1;j<=K;j++){ // iterate over row elements
+                v[i][j] *= s;
+            }
+        }
 
-// fast and less accurate
-double findZFromTable(double p){
-    if(p >= extremeTableThreshold){
-        double i = (p - extremeTableThreshold) / (1.0 - extremeTableThreshold) * (double)extremeTableSize;
-        double l = extremeTable[(int)i];
-        double r = extremeTable[extremeTableSize];
-        if(i < extremeTableSize) r = extremeTable[(int)i + 1];
-        // linear approximation between l and r
-        return l + (r - l) * (i - (int)i);
-    }
-    if(p <= 1.0 - extremeTableThreshold){
-        double i = (1.0 - extremeTableThreshold - p) / (1.0 - extremeTableThreshold) * (double)extremeTableSize;
-        double l = extremeTable[(int)i];
-        double r = extremeTable[extremeTableSize];
-        if(i < extremeTableSize) r = extremeTable[(int)i + 1];
-        // linear approximation between l and r
-        return -(l + (r - l) * (i - (int)i));
-    }
-    double i = p * (double)inverseZTableSize;
-    double l = inverseZTable[(int)i];
-    double r = inverseZTable[inverseZTableSize];
-    if(i < inverseZTableSize) r = inverseZTable[(int)i + 1];
-    // linear approximation between l and r
-    return l + (r - l) * (i - (int)i);
-}
-
-void printInverseZTable(){
-    printf("Inverse Z-Table (size %i):\n", inverseZTableSize);
-    for(int i=0;i<=inverseZTableSize;i++){
-        printf("%-20.14f%-20.14lf\n", (double)i / (double)inverseZTableSize, inverseZTable[i]);
-    }
-}
-
-void printExtremeTable(){
-    printf("\nInverse Z-Table Extreme Values (size %i, threshold %.14f):\n", extremeTableSize, extremeTableThreshold);
-    for(int i=0;i<=extremeTableSize;i++){
-        printf("%-20.14f%-20.14lf\n", ((double)i / (double)extremeTableSize) * (1.0 - extremeTableThreshold) + extremeTableThreshold, extremeTable[i]);
-    }
-    printf("\n");
-}
-
-void testAccuracy(int numTrials, char printAllResults){
-    if(numTrials < 1 || numTrials > 1000000){
-        printf("The number of trials in the accuracy test must be between 1 and 1000000.\n\n");
-        exit(1);
-    }
-
-    double avDev = 0.0;
-    double var = 0.0;
-    double sd = 0.0;
-    if(printAllResults) printf("%-20s%-20s%-20s%-20s\n", "Probability", "Real Z-Score", "Approx. Z-Score", "Deviation");
-    for(int i=0;i<numTrials;i++){
-        double p = ((double)rand() * 32768.0 + (double)rand()) / (32768.0 * 32768.0);
-        double a = findZGivenProb(p, -7.5, 7.5);
-        double b = findZFromTable(p);
-
-        double dev = fabs(a - b);
-        avDev += dev;
-        var += dev * dev;
+        // Store the results (last column).
+        for(int i=0;i<K;i++){
+            if(i < N){
+                D->coef[i] = v[i][K];
+            }else{
+                D->coef[i] = -v[i][K];
+            }
+        }
         
-        if(printAllResults) printf("%-20.14lf%-20.14lf%-20.14lf%-20.14lf\n", p, a, b, dev);
+        if(print){
+            printf("ITERATION %i\n\n", T);
+            printf("PARAMETERS\n");
+            for(int i=0;i<K;i++){
+                printf("%.20lf  ", D->coef[i]);
+            }
+            printf("\n\nERRORS\n");
+        }
+        
+        // Find the intervals between the test points.
+        // Find the maximum error in the intervals between the test points.
+        double e[101];
+        double ex[101];
+        for(int c=0;c<=K;c++){
+            e[c] = 0.0;
+            ex[c] = 0.0;
+
+            double x0 = A, x1 = B;
+            if(c > 0) x0 = points[c-1];
+            if(c < K) x1 = points[c];
+
+            for(int i=0;i<frequency;i++){
+                
+                double x = x0 + (x1 - x0) * i / (double)(frequency - 1);
+                if(i == frequency - 1) x = x1;
+
+                // Compute the vector result of the terms.
+                double r[100];
+                term(x, r);
+
+                double numer = 0.0;
+                double denom = 1.0;
+                for(int j=0;j<K;j++){
+                    if(j < N){
+                        numer += D->coef[j] * r[j];
+                    }else{
+                        denom += D->coef[j] * r[j];
+                    }
+                }
+
+                double error = (numer / denom) - f(x);
+                if(error < 0.0) error = -error;
+                if(error > e[c]){
+                    e[c] = error;
+                    ex[c] = x;
+                }
+            }
+
+            if(print){
+                printf("%.20lf at %.5lf (interval %.5lf)\n", e[c], ex[c], x1 - x0);
+            }
+        }
+
+        // Find the average, min, and max of all the errors.
+        D->errorMin = 1e300;
+        D->errorMax = -1e300;
+        D->errorAv = 0.0;
+        for(int c=0;c<=K;c++){
+            double x = e[c];
+            if(x > D->errorMax){
+                D->errorMax = x;
+            }
+            if(x < D->errorMin){
+                D->errorMin = x;
+            }
+            D->errorAv += e[c];
+        }
+        D->errorAv /= (double)(K + 1);
+
+        // Find the maximum deviation.
+        double md = 0.0;
+        for(int c=0;c<=K;c++){
+            double x = e[c] - D->errorAv;
+            if(x < 0.0) x = -x;
+            if(x > md) md = x;
+        }
+
+        // Find the normalized deviations.
+        double d[101];
+        for(int c=0;c<=K;c++){
+            d[c] = (e[c] - D->errorAv) / md;
+        }
+
+        // Calculate the step size.
+        double s = stepScale * md / D->errorAv;
+        if(s > stepMax) s = stepMax;
+
+        // Find the scaled interval lengths.
+        // Adding 1 to a normalized deviation multiplies that unnormalized interval length by 1.0 - step.
+        // Therefore, intervals with large errors get shrunk (since 1.0 - step < 1).
+        double l[101];
+        for(int c=0;c<=K;c++){
+            double x0 = A, x1 = B;
+            if(c > 0) x0 = points[c-1];
+            if(c < K) x1 = points[c];
+
+            double curr = e[c];
+            l[c] = pow(1 - s, d[c]) * (x1 - x0);
+        }
+
+        // Sum the lengths.
+        double total = 0.0;
+        for(int c=0;c<=K;c++){
+            total += l[c];
+        }
+
+        // Make sure every length is sufficiently large.
+        for(int c=0;c<=K;c++){
+            l[c] /= total;
+            double epsilon = 1e-15;
+            if(l[c] < epsilon){
+                l[c] = epsilon;
+            }
+        }
+
+        // Take the prefix sum of lengths.
+        double sum = 0.0;
+        for(int c=0;c<=K;c++){
+            sum += l[c];
+            l[c] = sum;
+        }
+
+        // Update the test points.
+        for(int c=0;c<K;c++){
+            points[c] = A + (B - A) * l[c] / l[K];
+        }
+
+        if(print){
+            printf("POINTS: ");
+            for(int c=0;c<K;c++){
+                printf("%.20lf ", points[c]);
+            }
+            printf("\n\n");
+        }
     }
-    avDev /= (double)numTrials;
-    var /= (double)numTrials;
-    sd = sqrt(var);
-    printf("Average Deviation: %.14f, Average Squared Deviation (Variance): %.14f, Standard Deviation: %.14f, Number of Trials: %i\n\n", avDev, var, sd, numTrials);
-}
 
-void testExtremeValues(){
-    double extremes[] = {0.0, 0.00000001, 0.0001, 1.0 - extremeTableThreshold - 0.00000001, 1.0 - extremeTableThreshold, 0.5, extremeTableThreshold - 0.00000001, extremeTableThreshold, 0.9999, 0.99999999, 1.0};
+    if(print){
+        printf("PARAMETERS\n");
+        for(int i=0;i<K;i++){
+            printf("%.20lf  ", D->coef[i]);
+        }
+        printf("\n\n");
 
-    for(int i=0;i<11;i++){
-        double p = extremes[i];
-        double a = findZGivenProb(p, -7.5, 7.5);
-        double b = findZFromTable(p);
-
-        double dev = fabs(a - b);
-        printf("%-20.14lf%-20.14lf%-20.14lf%-20.14lf\n", p, a, b, dev);
+        printf("%.20lf %.20lf\n", D->errorMin, D->errorMax);
     }
-}
 
-int main(void){
-
-    generateInverseZTable(100000, 100000, 0.9);
-
-    //printInverseZTable();
-    //printExtremeTable();
-
-    testAccuracy(100000, 0);
-    testExtremeValues();
-
-    return 0;
+    return 1;
 }
